@@ -3,6 +3,7 @@ import sqlite3
 import time
 import asyncio
 import threading
+from html import escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
@@ -16,15 +17,17 @@ from telegram.ext import (
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-TARGET_SPAM_COUNT = 2
-WEIGHT_PER_SPAM = 2000  # 2 кг
-SPAM_TIMEOUT = 30
+START_WEIGHT = 10          # 10 г
+SPAM_LIMIT = 2             # первые 2 GIF/стикера бесплатно
+WEIGHT_PER_SPAM = 2000     # +2 кг
+SPAM_TIMEOUT = 30          # сброс через 30 секунд
+
 DB_FILE = "weights.db"
 
 
-# =========================
-# Веб-сервер для Render
-# =========================
+# ==========================================
+# RENDER WEB SERVER
+# ==========================================
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -38,16 +41,20 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def start_web_server():
     port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+
+    server = HTTPServer(
+        ("0.0.0.0", port),
+        HealthHandler
+    )
 
     print(f"Web server started on port {port}")
 
     server.serve_forever()
 
 
-# =========================
-# База данных
-# =========================
+# ==========================================
+# DATABASE
+# ==========================================
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -55,10 +62,12 @@ def init_db():
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER,
+            user_id INTEGER,
             username TEXT,
             first_name TEXT,
-            weight INTEGER DEFAULT 10
+            weight INTEGER DEFAULT 10,
+            PRIMARY KEY (chat_id, user_id)
         )
     """)
 
@@ -66,41 +75,47 @@ def init_db():
     conn.close()
 
 
-def get_user(user):
+def get_user(chat_id, user):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    cursor.execute(
-        "SELECT weight FROM users WHERE user_id = ?",
-        (user.id,)
-    )
+    cursor.execute("""
+        SELECT weight
+        FROM users
+        WHERE chat_id = ? AND user_id = ?
+    """, (chat_id, user.id))
 
     result = cursor.fetchone()
 
     if result is None:
-        cursor.execute(
-            """
+        cursor.execute("""
             INSERT INTO users
-            (user_id, username, first_name, weight)
-            VALUES (?, ?, ?, ?)
-            """,
-            (user.id, user.username, user.first_name, 10)
-        )
+            (chat_id, user_id, username, first_name, weight)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            chat_id,
+            user.id,
+            user.username,
+            user.first_name,
+            START_WEIGHT
+        ))
 
         conn.commit()
-        weight = 10
+        weight = START_WEIGHT
 
     else:
         weight = result[0]
 
-        cursor.execute(
-            """
+        cursor.execute("""
             UPDATE users
             SET username = ?, first_name = ?
-            WHERE user_id = ?
-            """,
-            (user.username, user.first_name, user.id)
-        )
+            WHERE chat_id = ? AND user_id = ?
+        """, (
+            user.username,
+            user.first_name,
+            chat_id,
+            user.id
+        ))
 
         conn.commit()
 
@@ -109,25 +124,30 @@ def get_user(user):
     return weight
 
 
-def add_weight(user, amount):
+def add_weight(chat_id, user, amount):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
+    cursor.execute("""
         UPDATE users
         SET weight = weight + ?
-        WHERE user_id = ?
-        """,
-        (amount, user.id)
-    )
+        WHERE chat_id = ? AND user_id = ?
+    """, (
+        amount,
+        chat_id,
+        user.id
+    ))
 
     conn.commit()
 
-    cursor.execute(
-        "SELECT weight FROM users WHERE user_id = ?",
-        (user.id,)
-    )
+    cursor.execute("""
+        SELECT weight
+        FROM users
+        WHERE chat_id = ? AND user_id = ?
+    """, (
+        chat_id,
+        user.id
+    ))
 
     weight = cursor.fetchone()[0]
 
@@ -136,9 +156,9 @@ def add_weight(user, amount):
     return weight
 
 
-# =========================
-# Формат веса
-# =========================
+# ==========================================
+# FORMAT WEIGHT
+# ==========================================
 
 def format_weight(grams):
     if grams < 1000:
@@ -153,87 +173,102 @@ def format_weight(grams):
     return f"{kg} кг"
 
 
-# =========================
-# Настоящее упоминание
-# =========================
+# ==========================================
+# USER MENTION
+# ==========================================
+
+def mention_user_id(user_id, name):
+    return (
+        f'<a href="tg://user?id={user_id}">'
+        f'{escape(name)}'
+        f'</a>'
+    )
+
 
 def mention_user(user):
     name = user.first_name or "Участник"
+    return mention_user_id(user.id, name)
 
-    return f'<a href="tg://user?id={user.id}">{name}</a>'
 
-
-# =========================
-# GIF / Стикеры
-# =========================
+# ==========================================
+# SPAM SYSTEM
+# ==========================================
 
 spam_counter = {}
 last_spam_time = {}
 
 
-async def handle_media(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_media(update, context):
     message = update.effective_message
 
     if not message or not message.from_user:
         return
 
-    user = message.from_user
+    # Только группы
+    if message.chat.type not in ("group", "supergroup"):
+        return
 
-    # Только GIF и стикеры
+    # GIF или стикер
     if not (message.animation or message.sticker):
         return
 
+    user = message.from_user
+    chat_id = message.chat.id
+
+    # ВАЖНО:
+    # счётчик отдельный для каждого пользователя
+    # В КАЖДОЙ отдельной группе
+    key = (chat_id, user.id)
+
     now = time.time()
 
-    # Если прошло больше 30 секунд —
-    # начинаем считать спам заново
     if (
-        user.id not in last_spam_time
-        or now - last_spam_time[user.id] > SPAM_TIMEOUT
+        key not in last_spam_time
+        or now - last_spam_time[key] > SPAM_TIMEOUT
     ):
-        spam_counter[user.id] = 0
+        spam_counter[key] = 0
 
-    spam_counter[user.id] = spam_counter.get(user.id, 0) + 1
-    last_spam_time[user.id] = now
+    spam_counter[key] = spam_counter.get(key, 0) + 1
+    last_spam_time[key] = now
 
-    get_user(user)
+    # Создаём пользователя именно в этой группе
+    get_user(chat_id, user)
 
-    # Первые 2 GIF/стикера бесплатные
-    if spam_counter[user.id] <= TARGET_SPAM_COUNT:
+    # Первые 2 сообщения ничего не дают
+    if spam_counter[key] <= SPAM_LIMIT:
         return
 
-    # Каждый следующий = +2 кг
+    # +2 кг
     new_weight = add_weight(
+        chat_id,
         user,
         WEIGHT_PER_SPAM
     )
 
     await message.chat.send_message(
-        f"{mention_user(user)} прибавился жир "
-        f"<b>+2 кг</b> за спам! 🍔\n\n"
+        f"{mention_user(user)} "
+        f"прибавился жир <b>+2 кг</b> за спам! 🍔\n\n"
         f"⚖️ Теперь его вес: "
         f"<b>{format_weight(new_weight)}</b>",
         parse_mode="HTML"
     )
 
 
-# =========================
+# ==========================================
 # /weight
-# =========================
+# ==========================================
 
-async def weight_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def weight_command(update, context):
+    chat = update.effective_chat
     user = update.effective_user
 
-    if not user:
+    if not chat or not user:
         return
 
-    weight = get_user(user)
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    weight = get_user(chat.id, user)
 
     await update.message.reply_text(
         f"⚖️ Вес {mention_user(user)}: "
@@ -242,62 +277,103 @@ async def weight_command(
     )
 
 
-# =========================
+# ==========================================
 # /weights
-# =========================
+# ==========================================
 
-async def weights_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def weights_command(update, context):
+    chat = update.effective_chat
+
+    if not chat:
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    chat_id = chat.id
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
+    # ТОП-20
     cursor.execute("""
         SELECT user_id, username, first_name, weight
         FROM users
+        WHERE chat_id = ?
         ORDER BY weight DESC
         LIMIT 20
-    """)
+    """, (chat_id,))
 
     users = cursor.fetchall()
 
+    # Всего участников
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM users
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    total_users = cursor.fetchone()[0]
+
+    # Общий вес
+    cursor.execute("""
+        SELECT COALESCE(SUM(weight), 0)
+        FROM users
+        WHERE chat_id = ?
+    """, (chat_id,))
+
+    total_weight = cursor.fetchone()[0]
+
     conn.close()
 
-    if not users:
-        await update.message.reply_text(
-            "⚖️ Пока никто не набрал вес!"
-        )
-        return
+    # Название группы
+    group_name = chat.title or "ГРУППА"
 
-    text = "⚖️ <b>ТОП ПО ВЕСУ</b>\n\n"
+    text = (
+        f"⚖️ <b>ВЕС ГРУППЫ "
+        f"«{escape(group_name)}»</b>\n\n"
+    )
 
-    medals = ["🥇", "🥈", "🥉"]
+    if users:
+        medals = ["🥇", "🥈", "🥉"]
 
-    for index, (
-        user_id,
-        username,
-        first_name,
-        weight
-    ) in enumerate(users):
+        for index, (
+            user_id,
+            username,
+            first_name,
+            weight
+        ) in enumerate(users):
 
-        name = first_name or username or "Участник"
+            name = (
+                first_name
+                or username
+                or "Участник"
+            )
 
-        mention = (
-            f'<a href="tg://user?id={user_id}">'
-            f'{name}</a>'
-        )
+            mention = mention_user_id(
+                user_id,
+                name
+            )
 
-        medal = (
-            medals[index]
-            if index < 3
-            else f"{index + 1}."
-        )
+            if index < 3:
+                place = medals[index]
+            else:
+                place = f"{index + 1}."
 
-        text += (
-            f"{medal} {mention} — "
-            f"<b>{format_weight(weight)}</b>\n"
-        )
+            text += (
+                f"{place} {mention} — "
+                f"<b>{format_weight(weight)}</b>\n"
+            )
+
+    else:
+        text += "🍔 Пока никто не набрал вес!\n"
+
+    text += (
+        f"\n👥 <b>Всего участников:</b> "
+        f"{total_users}\n"
+        f"🍔 <b>Всего набрано:</b> "
+        f"{format_weight(total_weight)}"
+    )
 
     await update.message.reply_text(
         text,
@@ -305,32 +381,29 @@ async def weights_command(
     )
 
 
-# =========================
+# ==========================================
 # /start
-# =========================
+# ==========================================
 
-async def start_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start_command(update, context):
     await update.message.reply_text(
         "⚖️ <b>Жиро-бот запущен!</b>\n\n"
-        "🍼 Начальный вес: 10 г\n"
-        "🎞️ GIF/стикеры считаются как спам\n"
-        "🍔 После 2 сообщений начинается набор веса\n"
-        "⚖️ За каждый следующий: +2 кг\n\n"
+        "🍼 Начальный вес: <b>10 г</b>\n"
+        "🎞️ GIF и стикеры считаются как спам\n"
+        "🍔 Первые 2 сообщения — бесплатно\n"
+        "⚖️ Каждый следующий GIF/стикер — <b>+2 кг</b>\n"
+        "⏱️ Через 30 секунд счётчик спама сбрасывается\n\n"
         "/weight — мой вес\n"
-        "/weights — таблица весов",
+        "/weights — вес группы",
         parse_mode="HTML"
     )
 
 
-# =========================
-# Запуск
-# =========================
+# ==========================================
+# MAIN
+# ==========================================
 
 async def main():
-
     init_db()
 
     app = (
@@ -341,24 +414,15 @@ async def main():
     )
 
     app.add_handler(
-        CommandHandler(
-            "start",
-            start_command
-        )
+        CommandHandler("start", start_command)
     )
 
     app.add_handler(
-        CommandHandler(
-            "weight",
-            weight_command
-        )
+        CommandHandler("weight", weight_command)
     )
 
     app.add_handler(
-        CommandHandler(
-            "weights",
-            weights_command
-        )
+        CommandHandler("weights", weights_command)
     )
 
     app.add_handler(
@@ -383,9 +447,12 @@ async def main():
         await app.shutdown()
 
 
+# ==========================================
+# START
+# ==========================================
+
 if __name__ == "__main__":
 
-    # Запускаем веб-сервер Render
     web_thread = threading.Thread(
         target=start_web_server,
         daemon=True
@@ -393,5 +460,4 @@ if __name__ == "__main__":
 
     web_thread.start()
 
-    # Запускаем Telegram-бота
     asyncio.run(main())
