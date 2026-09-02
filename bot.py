@@ -24,7 +24,10 @@ SPAM_TIMEOUT = 30          # сброс через 30 секунд
 
 DB_FILE = "weights.db"
 
-# ID владельца секретной команды
+# ==========================================
+# ВЛАДЕЛЕЦ СЕКРЕТНОЙ КОМАНДЫ
+# ==========================================
+
 OWNER_ID = 6277246689
 
 
@@ -33,6 +36,7 @@ OWNER_ID = 6277246689
 # ==========================================
 
 class HealthHandler(BaseHTTPRequestHandler):
+
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
@@ -43,6 +47,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 
 def start_web_server():
+
     port = int(os.environ.get("PORT", 10000))
 
     server = HTTPServer(
@@ -60,6 +65,7 @@ def start_web_server():
 # ==========================================
 
 def init_db():
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -79,6 +85,7 @@ def init_db():
 
 
 def get_user(chat_id, user):
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -86,11 +93,15 @@ def get_user(chat_id, user):
         SELECT weight
         FROM users
         WHERE chat_id = ? AND user_id = ?
-    """, (chat_id, user.id))
+    """, (
+        chat_id,
+        user.id
+    ))
 
     result = cursor.fetchone()
 
     if result is None:
+
         cursor.execute("""
             INSERT INTO users
             (chat_id, user_id, username, first_name, weight)
@@ -104,9 +115,11 @@ def get_user(chat_id, user):
         ))
 
         conn.commit()
+
         weight = START_WEIGHT
 
     else:
+
         weight = result[0]
 
         cursor.execute("""
@@ -128,6 +141,7 @@ def get_user(chat_id, user):
 
 
 def add_weight(chat_id, user, amount):
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -152,11 +166,14 @@ def add_weight(chat_id, user, amount):
         user.id
     ))
 
-    weight = cursor.fetchone()[0]
+    result = cursor.fetchone()
 
     conn.close()
 
-    return weight
+    if result is None:
+        return None
+
+    return result[0]
 
 
 # ==========================================
@@ -164,6 +181,7 @@ def add_weight(chat_id, user, amount):
 # ==========================================
 
 def format_weight(grams):
+
     if grams < 1000:
         return f"{grams} г"
 
@@ -181,6 +199,7 @@ def format_weight(grams):
 # ==========================================
 
 def mention_user_id(user_id, name):
+
     return (
         f'<a href="tg://user?id={user_id}">'
         f'{escape(name)}'
@@ -189,8 +208,13 @@ def mention_user_id(user_id, name):
 
 
 def mention_user(user):
+
     name = user.first_name or "Участник"
-    return mention_user_id(user.id, name)
+
+    return mention_user_id(
+        user.id,
+        name
+    )
 
 
 # ==========================================
@@ -202,25 +226,35 @@ last_spam_time = {}
 
 
 async def handle_media(update, context):
+
     message = update.effective_message
 
     if not message or not message.from_user:
         return
 
     # Только группы
-    if message.chat.type not in ("group", "supergroup"):
+    if message.chat.type not in (
+        "group",
+        "supergroup"
+    ):
         return
 
-    # GIF или стикер
-    if not (message.animation or message.sticker):
+    # Только GIF или стикеры
+    if not (
+        message.animation
+        or message.sticker
+    ):
         return
 
     user = message.from_user
     chat_id = message.chat.id
 
-    # Счётчик отдельный для каждого пользователя
-    # в каждой отдельной группе
-    key = (chat_id, user.id)
+    # Отдельный счётчик для каждого
+    # пользователя в каждой группе
+    key = (
+        chat_id,
+        user.id
+    )
 
     now = time.time()
 
@@ -230,13 +264,19 @@ async def handle_media(update, context):
     ):
         spam_counter[key] = 0
 
-    spam_counter[key] = spam_counter.get(key, 0) + 1
+    spam_counter[key] = (
+        spam_counter.get(key, 0) + 1
+    )
+
     last_spam_time[key] = now
 
-    # Создаём пользователя именно в этой группе
-    get_user(chat_id, user)
+    # Создаём пользователя
+    get_user(
+        chat_id,
+        user
+    )
 
-    # Первые 2 сообщения ничего не дают
+    # Первые 2 бесплатно
     if spam_counter[key] <= SPAM_LIMIT:
         return
 
@@ -248,10 +288,14 @@ async def handle_media(update, context):
     )
 
     await message.chat.send_message(
+
         f"{mention_user(user)} "
-        f"прибавился жир <b>+2 кг</b> за спам! 🍔\n\n"
+        f"прибавился жир "
+        f"<b>+2 кг</b> за спам! 🍔\n\n"
+
         f"⚖️ Теперь его вес: "
         f"<b>{format_weight(new_weight)}</b>",
+
         parse_mode="HTML"
     )
 
@@ -261,20 +305,29 @@ async def handle_media(update, context):
 # ==========================================
 
 async def weight_command(update, context):
+
     chat = update.effective_chat
     user = update.effective_user
 
     if not chat or not user:
         return
 
-    if chat.type not in ("group", "supergroup"):
+    if chat.type not in (
+        "group",
+        "supergroup"
+    ):
         return
 
-    weight = get_user(chat.id, user)
+    weight = get_user(
+        chat.id,
+        user
+    )
 
     await update.message.reply_text(
+
         f"⚖️ Вес {mention_user(user)}: "
         f"<b>{format_weight(weight)}</b>",
+
         parse_mode="HTML"
     )
 
@@ -284,12 +337,16 @@ async def weight_command(update, context):
 # ==========================================
 
 async def weights_command(update, context):
+
     chat = update.effective_chat
 
     if not chat:
         return
 
-    if chat.type not in ("group", "supergroup"):
+    if chat.type not in (
+        "group",
+        "supergroup"
+    ):
         return
 
     chat_id = chat.id
@@ -308,7 +365,7 @@ async def weights_command(update, context):
 
     users = cursor.fetchall()
 
-    # Всего участников
+    # Количество участников
     cursor.execute("""
         SELECT COUNT(*)
         FROM users
@@ -328,7 +385,6 @@ async def weights_command(update, context):
 
     conn.close()
 
-    # Название группы
     group_name = chat.title or "ГРУППА"
 
     text = (
@@ -337,7 +393,12 @@ async def weights_command(update, context):
     )
 
     if users:
-        medals = ["🥇", "🥈", "🥉"]
+
+        medals = [
+            "🥇",
+            "🥈",
+            "🥉"
+        ]
 
         for index, (
             user_id,
@@ -368,11 +429,17 @@ async def weights_command(update, context):
             )
 
     else:
-        text += "🍔 Пока никто не набрал вес!\n"
+
+        text += (
+            "🍔 Пока никто "
+            "не набрал вес!\n"
+        )
 
     text += (
+
         f"\n👥 <b>Всего участников:</b> "
         f"{total_users}\n"
+
         f"🍔 <b>Всего набрано:</b> "
         f"{format_weight(total_weight)}"
     )
@@ -384,10 +451,12 @@ async def weights_command(update, context):
 
 
 # ==========================================
-# /fatgive — СЕКРЕТНАЯ КОМАНДА
+# /fatgive
+# СЕКРЕТНАЯ КОМАНДА
 # ==========================================
 
 async def fatgive_command(update, context):
+
     user = update.effective_user
     chat = update.effective_chat
     message = update.effective_message
@@ -395,72 +464,212 @@ async def fatgive_command(update, context):
     if not user or not chat or not message:
         return
 
-    # Только владелец может использовать команду
+    # ======================================
+    # ПРОВЕРКА ВЛАДЕЛЬЦА
+    # ======================================
+
     if user.id != OWNER_ID:
-        await message.reply_text("❌ Нет доступа.")
+
+        # Ничего не объясняем другим
         return
 
-    # Только в группах
-    if chat.type not in ("group", "supergroup"):
+    # ======================================
+    # ТОЛЬКО ГРУППА
+    # ======================================
+
+    if chat.type not in (
+        "group",
+        "supergroup"
+    ):
+
         await message.reply_text(
-            "❌ Эту команду можно использовать только в группе."
+            "❌ Используй эту команду в группе."
         )
+
         return
 
-    # Команда должна быть ответом на сообщение
-    if not message.reply_to_message:
-        await message.reply_text(
-            "🍔 Ответь на сообщение человека и напиши:\n\n"
-            "/fatgive 100000\n\n"
-            "100000 = +100 кг"
+    # ======================================
+    # ВАРИАНТ 1
+    # ОТВЕТОМ НА СООБЩЕНИЕ
+    #
+    # /fatgive 100000
+    # ======================================
+
+    if message.reply_to_message:
+
+        target = (
+            message.reply_to_message.from_user
         )
-        return
 
-    target = message.reply_to_message.from_user
+        if not target:
 
-    if not target:
-        await message.reply_text("❌ Не удалось определить пользователя.")
-        return
+            await message.reply_text(
+                "❌ Не удалось определить пользователя."
+            )
 
-    # Проверяем количество
-    if len(context.args) < 1:
-        await message.reply_text(
-            "❌ Укажи количество граммов.\n\n"
-            "Например: /fatgive 100000"
-        )
-        return
+            return
 
-    try:
-        amount = int(context.args[0])
-    except ValueError:
-        await message.reply_text(
-            "❌ Количество должно быть целым числом."
-        )
-        return
+        if len(context.args) != 1:
 
-    # Запрещаем 0 и отрицательные значения
+            await message.reply_text(
+                "❌ Использование:\n"
+                "/fatgive 100000"
+            )
+
+            return
+
+        try:
+
+            amount = int(
+                context.args[0]
+            )
+
+        except ValueError:
+
+            await message.reply_text(
+                "❌ Количество должно быть числом."
+            )
+
+            return
+
+    # ======================================
+    # ВАРИАНТ 2
+    # ПО TELEGRAM ID
+    #
+    # /fatgive 123456789 100000
+    # ======================================
+
+    else:
+
+        if len(context.args) != 2:
+
+            await message.reply_text(
+                "🍔 Использование:\n\n"
+
+                "Ответом на сообщение:\n"
+                "/fatgive 100000\n\n"
+
+                "Или по Telegram ID:\n"
+                "/fatgive 123456789 100000"
+            )
+
+            return
+
+        try:
+
+            target_id = int(
+                context.args[0]
+            )
+
+            amount = int(
+                context.args[1]
+            )
+
+        except ValueError:
+
+            await message.reply_text(
+                "❌ ID и количество "
+                "должны быть числами."
+            )
+
+            return
+
+        # ==================================
+        # ИЩЕМ ПОЛЬЗОВАТЕЛЯ В БАЗЕ
+        # ==================================
+
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT username, first_name
+            FROM users
+            WHERE chat_id = ?
+            AND user_id = ?
+        """, (
+            chat.id,
+            target_id
+        ))
+
+        result = cursor.fetchone()
+
+        conn.close()
+
+        # Создаём объект пользователя
+        class TargetUser:
+
+            def __init__(
+                self,
+                user_id,
+                username=None,
+                first_name="Участник"
+            ):
+
+                self.id = user_id
+                self.username = username
+                self.first_name = (
+                    first_name or "Участник"
+                )
+
+        if result:
+
+            target = TargetUser(
+                target_id,
+                result[0],
+                result[1]
+            )
+
+        else:
+
+            target = TargetUser(
+                target_id
+            )
+
+    # ======================================
+    # ПРОВЕРКА КОЛИЧЕСТВА
+    # ======================================
+
     if amount <= 0:
+
         await message.reply_text(
             "❌ Количество должно быть больше 0."
         )
+
         return
 
-    # Создаём пользователя в базе, если его ещё нет
-    get_user(chat.id, target)
+    # ======================================
+    # СОЗДАЁМ ПОЛЬЗОВАТЕЛЯ
+    # ======================================
 
-    # Добавляем жир
+    get_user(
+        chat.id,
+        target
+    )
+
+    # ======================================
+    # ДОБАВЛЯЕМ ЖИР
+    # ======================================
+
     new_weight = add_weight(
         chat.id,
         target,
         amount
     )
 
+    # ======================================
+    # РЕЗУЛЬТАТ
+    # ======================================
+
     await message.reply_text(
+
         f"🍔 <b>СЕКРЕТНАЯ ОПЕРАЦИЯ</b>\n\n"
+
         f"{mention_user(target)} получил "
         f"<b>+{format_weight(amount)}</b>!\n\n"
+
         f"⚖️ Новый вес: "
         f"<b>{format_weight(new_weight)}</b>",
+
         parse_mode="HTML"
     )
 
@@ -470,15 +679,22 @@ async def fatgive_command(update, context):
 # ==========================================
 
 async def start_command(update, context):
+
     await update.message.reply_text(
+
         "⚖️ <b>Жиро-бот запущен!</b>\n\n"
+
         "🍼 Начальный вес: <b>10 г</b>\n"
         "🎞️ GIF и стикеры считаются как спам\n"
         "🍔 Первые 2 сообщения — бесплатно\n"
-        "⚖️ Каждый следующий GIF/стикер — <b>+2 кг</b>\n"
-        "⏱️ Через 30 секунд счётчик спама сбрасывается\n\n"
+        "⚖️ Каждый следующий GIF/стикер — "
+        "<b>+2 кг</b>\n"
+        "⏱️ Через 30 секунд счётчик "
+        "спама сбрасывается\n\n"
+
         "/weight — мой вес\n"
         "/weights — вес группы",
+
         parse_mode="HTML"
     )
 
@@ -488,6 +704,7 @@ async def start_command(update, context):
 # ==========================================
 
 async def main():
+
     init_db()
 
     app = (
@@ -497,23 +714,39 @@ async def main():
         .build()
     )
 
+    # /start
     app.add_handler(
-        CommandHandler("start", start_command)
+        CommandHandler(
+            "start",
+            start_command
+        )
     )
 
+    # /weight
     app.add_handler(
-        CommandHandler("weight", weight_command)
+        CommandHandler(
+            "weight",
+            weight_command
+        )
     )
 
+    # /weights
     app.add_handler(
-        CommandHandler("weights", weights_command)
+        CommandHandler(
+            "weights",
+            weights_command
+        )
     )
 
-    # Секретная команда
+    # /fatgive
     app.add_handler(
-        CommandHandler("fatgive", fatgive_command)
+        CommandHandler(
+            "fatgive",
+            fatgive_command
+        )
     )
 
+    # GIF + стикеры
     app.add_handler(
         MessageHandler(
             filters.ALL,
@@ -528,9 +761,11 @@ async def main():
     await app.updater.start_polling()
 
     try:
+
         await asyncio.Event().wait()
 
     finally:
+
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
