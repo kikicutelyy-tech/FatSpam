@@ -2,6 +2,8 @@ import os
 import sqlite3
 import time
 import asyncio
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
 from telegram.ext import (
@@ -14,20 +16,38 @@ from telegram.ext import (
 
 TOKEN = os.environ["BOT_TOKEN"]
 
-# Сколько дают за спам
-WEIGHT_PER_SPAM = 2_000  # 2 кг в граммах
-
-# После этого времени спам-счётчик сбрасывается
+TARGET_SPAM_COUNT = 2
+WEIGHT_PER_SPAM = 2000  # 2 кг
 SPAM_TIMEOUT = 30
-
-# После скольких GIF/стикеров начинается наказание
-SPAM_LIMIT = 2
-
 DB_FILE = "weights.db"
 
-spam_counter = {}
-last_spam_time = {}
 
+# =========================
+# Веб-сервер для Render
+# =========================
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+
+    print(f"Web server started on port {port}")
+
+    server.serve_forever()
+
+
+# =========================
+# База данных
+# =========================
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -60,13 +80,16 @@ def get_user(user):
     if result is None:
         cursor.execute(
             """
-            INSERT INTO users (user_id, username, first_name, weight)
+            INSERT INTO users
+            (user_id, username, first_name, weight)
             VALUES (?, ?, ?, ?)
             """,
             (user.id, user.username, user.first_name, 10)
         )
+
         conn.commit()
         weight = 10
+
     else:
         weight = result[0]
 
@@ -78,9 +101,11 @@ def get_user(user):
             """,
             (user.username, user.first_name, user.id)
         )
+
         conn.commit()
 
     conn.close()
+
     return weight
 
 
@@ -107,8 +132,13 @@ def add_weight(user, amount):
     weight = cursor.fetchone()[0]
 
     conn.close()
+
     return weight
 
+
+# =========================
+# Формат веса
+# =========================
 
 def format_weight(grams):
     if grams < 1000:
@@ -123,10 +153,22 @@ def format_weight(grams):
     return f"{kg} кг"
 
 
+# =========================
+# Настоящее упоминание
+# =========================
+
 def mention_user(user):
     name = user.first_name or "Участник"
 
     return f'<a href="tg://user?id={user.id}">{name}</a>'
+
+
+# =========================
+# GIF / Стикеры
+# =========================
+
+spam_counter = {}
+last_spam_time = {}
 
 
 async def handle_media(
@@ -146,7 +188,8 @@ async def handle_media(
 
     now = time.time()
 
-    # Проверяем таймер спама
+    # Если прошло больше 30 секунд —
+    # начинаем считать спам заново
     if (
         user.id not in last_spam_time
         or now - last_spam_time[user.id] > SPAM_TIMEOUT
@@ -156,23 +199,30 @@ async def handle_media(
     spam_counter[user.id] = spam_counter.get(user.id, 0) + 1
     last_spam_time[user.id] = now
 
-    # Создаём пользователя, если его ещё нет
     get_user(user)
 
-    # Первые 2 сообщения не дают вес
-    if spam_counter[user.id] <= SPAM_LIMIT:
+    # Первые 2 GIF/стикера бесплатные
+    if spam_counter[user.id] <= TARGET_SPAM_COUNT:
         return
 
-    # Каждое следующее сообщение = +2 кг
-    new_weight = add_weight(user, WEIGHT_PER_SPAM)
+    # Каждый следующий = +2 кг
+    new_weight = add_weight(
+        user,
+        WEIGHT_PER_SPAM
+    )
 
     await message.chat.send_message(
         f"{mention_user(user)} прибавился жир "
         f"<b>+2 кг</b> за спам! 🍔\n\n"
-        f"⚖️ Теперь его вес: <b>{format_weight(new_weight)}</b>",
-        parse_mode="HTML",
+        f"⚖️ Теперь его вес: "
+        f"<b>{format_weight(new_weight)}</b>",
+        parse_mode="HTML"
     )
 
+
+# =========================
+# /weight
+# =========================
 
 async def weight_command(
     update: Update,
@@ -188,9 +238,13 @@ async def weight_command(
     await update.message.reply_text(
         f"⚖️ Вес {mention_user(user)}: "
         f"<b>{format_weight(weight)}</b>",
-        parse_mode="HTML",
+        parse_mode="HTML"
     )
 
+
+# =========================
+# /weights
+# =========================
 
 async def weights_command(
     update: Update,
@@ -207,6 +261,7 @@ async def weights_command(
     """)
 
     users = cursor.fetchall()
+
     conn.close()
 
     if not users:
@@ -219,12 +274,25 @@ async def weights_command(
 
     medals = ["🥇", "🥈", "🥉"]
 
-    for index, (user_id, username, first_name, weight) in enumerate(users):
+    for index, (
+        user_id,
+        username,
+        first_name,
+        weight
+    ) in enumerate(users):
+
         name = first_name or username or "Участник"
 
-        mention = f'<a href="tg://user?id={user_id}">{name}</a>'
+        mention = (
+            f'<a href="tg://user?id={user_id}">'
+            f'{name}</a>'
+        )
 
-        medal = medals[index] if index < 3 else f"{index + 1}."
+        medal = (
+            medals[index]
+            if index < 3
+            else f"{index + 1}."
+        )
 
         text += (
             f"{medal} {mention} — "
@@ -237,29 +305,61 @@ async def weights_command(
     )
 
 
+# =========================
+# /start
+# =========================
+
 async def start_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
     await update.message.reply_text(
         "⚖️ <b>Жиро-бот запущен!</b>\n\n"
-        "🎞️ Спам GIF/стикерами увеличивает вес.\n"
-        "🍼 Начальный вес — 10 г.\n"
-        "🍔 После 2 сообщений начинается набор веса.\n\n"
-        "/weight — твой вес\n"
+        "🍼 Начальный вес: 10 г\n"
+        "🎞️ GIF/стикеры считаются как спам\n"
+        "🍔 После 2 сообщений начинается набор веса\n"
+        "⚖️ За каждый следующий: +2 кг\n\n"
+        "/weight — мой вес\n"
         "/weights — таблица весов",
         parse_mode="HTML"
     )
 
 
+# =========================
+# Запуск
+# =========================
+
 async def main():
+
     init_db()
 
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application
+        .builder()
+        .token(TOKEN)
+        .build()
+    )
 
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("weight", weight_command))
-    app.add_handler(CommandHandler("weights", weights_command))
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start_command
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "weight",
+            weight_command
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "weights",
+            weights_command
+        )
+    )
 
     app.add_handler(
         MessageHandler(
@@ -276,6 +376,7 @@ async def main():
 
     try:
         await asyncio.Event().wait()
+
     finally:
         await app.updater.stop()
         await app.stop()
@@ -283,4 +384,14 @@ async def main():
 
 
 if __name__ == "__main__":
+
+    # Запускаем веб-сервер Render
+    web_thread = threading.Thread(
+        target=start_web_server,
+        daemon=True
+    )
+
+    web_thread.start()
+
+    # Запускаем Telegram-бота
     asyncio.run(main())
