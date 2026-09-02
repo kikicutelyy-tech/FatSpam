@@ -24,6 +24,9 @@ SPAM_TIMEOUT = 30          # сброс через 30 секунд
 
 DB_FILE = "weights.db"
 
+# ID владельца секретной команды
+OWNER_ID = 6277246689
+
 
 # ==========================================
 # RENDER WEB SERVER
@@ -215,9 +218,8 @@ async def handle_media(update, context):
     user = message.from_user
     chat_id = message.chat.id
 
-    # ВАЖНО:
-    # счётчик отдельный для каждого пользователя
-    # В КАЖДОЙ отдельной группе
+    # Счётчик отдельный для каждого пользователя
+    # в каждой отдельной группе
     key = (chat_id, user.id)
 
     now = time.time()
@@ -382,6 +384,88 @@ async def weights_command(update, context):
 
 
 # ==========================================
+# /fatgive — СЕКРЕТНАЯ КОМАНДА
+# ==========================================
+
+async def fatgive_command(update, context):
+    user = update.effective_user
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if not user or not chat or not message:
+        return
+
+    # Только владелец может использовать команду
+    if user.id != OWNER_ID:
+        await message.reply_text("❌ Нет доступа.")
+        return
+
+    # Только в группах
+    if chat.type not in ("group", "supergroup"):
+        await message.reply_text(
+            "❌ Эту команду можно использовать только в группе."
+        )
+        return
+
+    # Команда должна быть ответом на сообщение
+    if not message.reply_to_message:
+        await message.reply_text(
+            "🍔 Ответь на сообщение человека и напиши:\n\n"
+            "/fatgive 100000\n\n"
+            "100000 = +100 кг"
+        )
+        return
+
+    target = message.reply_to_message.from_user
+
+    if not target:
+        await message.reply_text("❌ Не удалось определить пользователя.")
+        return
+
+    # Проверяем количество
+    if len(context.args) < 1:
+        await message.reply_text(
+            "❌ Укажи количество граммов.\n\n"
+            "Например: /fatgive 100000"
+        )
+        return
+
+    try:
+        amount = int(context.args[0])
+    except ValueError:
+        await message.reply_text(
+            "❌ Количество должно быть целым числом."
+        )
+        return
+
+    # Запрещаем 0 и отрицательные значения
+    if amount <= 0:
+        await message.reply_text(
+            "❌ Количество должно быть больше 0."
+        )
+        return
+
+    # Создаём пользователя в базе, если его ещё нет
+    get_user(chat.id, target)
+
+    # Добавляем жир
+    new_weight = add_weight(
+        chat.id,
+        target,
+        amount
+    )
+
+    await message.reply_text(
+        f"🍔 <b>СЕКРЕТНАЯ ОПЕРАЦИЯ</b>\n\n"
+        f"{mention_user(target)} получил "
+        f"<b>+{format_weight(amount)}</b>!\n\n"
+        f"⚖️ Новый вес: "
+        f"<b>{format_weight(new_weight)}</b>",
+        parse_mode="HTML"
+    )
+
+
+# ==========================================
 # /start
 # ==========================================
 
@@ -423,6 +507,11 @@ async def main():
 
     app.add_handler(
         CommandHandler("weights", weights_command)
+    )
+
+    # Секретная команда
+    app.add_handler(
+        CommandHandler("fatgive", fatgive_command)
     )
 
     app.add_handler(
